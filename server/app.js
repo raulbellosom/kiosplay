@@ -8,18 +8,20 @@ const fs = require('fs');
 const app = express();
 const PORT = process.env.PORT || 3001;
 const UPLOAD_DIR = process.env.UPLOAD_DIR || './uploads';
+const TEMP_DIR   = process.env.TEMP_DIR   || './temp';
 
-// Asegurar que el directorio de uploads exista
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+fs.mkdirSync(TEMP_DIR, { recursive: true });
 
 // Middlewares
 app.use(cors());
 app.use(express.json());
 
-// Servir archivos subidos como estáticos
 app.use('/uploads', express.static(path.resolve(UPLOAD_DIR)));
+app.use('/temp',    express.static(path.resolve(TEMP_DIR)));
 
 // Rutas API
+app.use('/api/tools',  require('./routes/tools'));
 app.use('/api/kiosks', require('./routes/kiosks'));
 app.use('/api/kiosks', require('./routes/items'));
 app.use('/api/items', require('./routes/items'));

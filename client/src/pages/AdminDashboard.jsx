@@ -77,9 +77,14 @@ export default function AdminDashboard() {
       <main className="admin-main">
         <div className="section-header">
           <h2>Kioskos</h2>
-          <button className="btn btn-primary" onClick={() => setShowCreate(true)}>
-            + Nuevo kiosko
-          </button>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <Link to="/admin/tools" className="btn btn-ghost">
+              Herramientas
+            </Link>
+            <button className="btn btn-primary" onClick={() => setShowCreate(true)}>
+              + Nuevo kiosko
+            </button>
+          </div>
         </div>
 
         {error && <div className="alert alert-error">{error}</div>}

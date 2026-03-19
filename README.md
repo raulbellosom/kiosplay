@@ -3,7 +3,7 @@
 App web para digital signage / kioskos de contenido multimedia.
 Permite gestionar pantallas con playlists de imágenes y videos desde un panel admin, y reproducirlas en bucle en modo kiosk de Firefox.
 
-**Stack:** React + Vite · Node.js + Express · SQLite (better-sqlite3) · Multer
+**Stack:** React + Vite · Node.js + Express · SQLite (better-sqlite3) · Multer · FFmpeg · pdf2pic
 
 ---
 
@@ -384,6 +384,34 @@ Reemplaza `slug-del-kiosko` con el slug configurado en el panel admin (ej. `rece
 | DELETE | `/api/items/:id` | Eliminar item y su archivo |
 | PUT | `/api/kiosks/:id/reorder` | Reordenar playlist |
 | GET | `/api/public/kiosk/:slug` | Datos del kiosko para el player |
+
+---
+
+## Herramientas de conversión
+
+Accesibles desde el panel admin en `/admin/tools`.
+
+| Herramienta | Descripción | Requisitos del sistema |
+|-------------|-------------|------------------------|
+| Video → GIF | Convierte un fragmento de video a GIF animado | Solo FFmpeg (incluido en `ffmpeg-static`) |
+| Comprimir Video | Reduce el tamaño de un video con H.264 | Solo FFmpeg (incluido en `ffmpeg-static`) |
+| PDF → Imágenes | Convierte cada página de un PDF en imagen PNG/JPG | **ImageMagick + Ghostscript** |
+
+### Instalar ImageMagick + Ghostscript para PDF → Imágenes
+
+**Windows:**
+1. Descargar e instalar [Ghostscript](https://www.ghostscript.com/releases/gsdnld.html) (versión 64-bit)
+2. Descargar e instalar [ImageMagick](https://imagemagick.org/script/download.php#windows) — marcar "Install legacy utilities" durante la instalación
+3. Reiniciar la terminal
+
+**Ubuntu/Debian:**
+```bash
+sudo apt-get install imagemagick ghostscript
+# Puede ser necesario habilitar PDF en ImageMagick:
+sudo sed -i 's|<policy domain="coder" rights="none" pattern="PDF" />|<policy domain="coder" rights="read\|write" pattern="PDF" />|' /etc/ImageMagick-6/policy.xml
+```
+
+Los archivos temporales generados se guardan en `server/temp/` y se pueden limpiar manualmente.
 
 ---
 
