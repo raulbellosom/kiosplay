@@ -26,6 +26,9 @@ export default function AdminKioskEdit() {
   const [enabled, setEnabled] = useState(true);
   const [saving, setSaving] = useState(false);
 
+  // Edición local de duraciones (para que el input no llame a la API en cada tecla)
+  const [durationEdits, setDurationEdits] = useState({});
+
   // Upload
   const fileInputRef = useRef(null);
   const [dragOver, setDragOver] = useState(false);
@@ -365,8 +368,12 @@ export default function AdminKioskEdit() {
                         type="number"
                         min="1"
                         max="300"
-                        value={item.durationSeconds}
-                        onChange={e => handleDuration(item, e.target.value)}
+                        value={durationEdits[item.id] ?? item.durationSeconds}
+                        onChange={e => setDurationEdits(prev => ({ ...prev, [item.id]: e.target.value }))}
+                        onBlur={e => {
+                          handleDuration(item, e.target.value);
+                          setDurationEdits(prev => { const n = { ...prev }; delete n[item.id]; return n; });
+                        }}
                         title="Duración en segundos"
                       />
                       <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>seg</span>

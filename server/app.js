@@ -22,6 +22,7 @@ app.use('/uploads', express.static(path.resolve(UPLOAD_DIR)));
 // Rutas API
 app.use('/api/kiosks', require('./routes/kiosks'));
 app.use('/api/kiosks', require('./routes/items'));
+app.use('/api/items', require('./routes/items'));
 app.use('/api/public', require('./routes/public'));
 
 // En producción: servir el build del frontend

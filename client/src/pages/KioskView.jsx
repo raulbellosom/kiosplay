@@ -102,7 +102,12 @@ export default function KioskView() {
     const item = items[currentIndex];
     if (item?.type === 'video' && videoRef.current) {
       videoRef.current.load();
-      videoRef.current.play().catch(() => {});
+      videoRef.current.play().catch(() => {
+        // Retry tras un breve delay (algunos navegadores necesitan un tick)
+        setTimeout(() => {
+          if (videoRef.current) videoRef.current.play().catch(() => {});
+        }, 300);
+      });
     }
   }, [currentIndex, items]);
 
@@ -163,6 +168,7 @@ export default function KioskView() {
           muted
           playsInline
           preload="auto"
+          onCanPlay={() => { if (videoRef.current) videoRef.current.play().catch(() => {}); }}
           onEnded={handleVideoEnded}
           onError={handleVideoError}
           style={{ objectFit: 'cover' }}
