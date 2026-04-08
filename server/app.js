@@ -17,8 +17,23 @@ fs.mkdirSync(TEMP_DIR, { recursive: true });
 app.use(cors());
 app.use(express.json());
 
-app.use('/uploads', express.static(path.resolve(UPLOAD_DIR)));
-app.use('/temp',    express.static(path.resolve(TEMP_DIR)));
+const MEDIA_EXTS = new Set([
+  '.mp4', '.webm', '.ogg', '.mov', '.avi', '.mkv',
+  '.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp',
+]);
+
+app.use('/uploads', express.static(path.resolve(UPLOAD_DIR), {
+  setHeaders(res, filePath) {
+    const ext = path.extname(filePath).toLowerCase();
+    if (MEDIA_EXTS.has(ext)) {
+      // Allow browsers to cache media for 24 h without revalidation.
+      // This fixes large-file (>40 MB) failures on the second play caused
+      // by max-age=0 + conditional Range requests returning provisional 304.
+      res.setHeader('Cache-Control', 'public, max-age=86400');
+    }
+  },
+}));
+app.use('/temp', express.static(path.resolve(TEMP_DIR)));
 
 // Rutas API
 app.use('/api/tools',  require('./routes/tools'));
