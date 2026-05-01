@@ -6,13 +6,28 @@ const fs = require('fs');
 const { randomUUID } = require('crypto');
 const ffmpeg = require('fluent-ffmpeg');
 const ffmpegPath = require('ffmpeg-static');
-const { fromPath } = require('pdf2pic');
 const db = require('../db');
+const config = require('../config');
+
+// Polyfill browser globals required by pdfjs-dist in Node.js
+const { createCanvas, DOMMatrix, Path2D, ImageData } = require('@napi-rs/canvas');
+if (typeof global.DOMMatrix === 'undefined') global.DOMMatrix = DOMMatrix;
+if (typeof global.Path2D    === 'undefined') global.Path2D    = Path2D;
+if (typeof global.ImageData === 'undefined') global.ImageData = ImageData;
+
+// pdfjs-dist is ESM-only; we lazy-import it on first PDF request
+let _pdfjsLib = null;
+async function getPdfJs() {
+  if (!_pdfjsLib) {
+    _pdfjsLib = await import('pdfjs-dist/legacy/build/pdf.mjs');
+  }
+  return _pdfjsLib;
+}
 
 ffmpeg.setFfmpegPath(ffmpegPath);
 
-const TEMP_DIR = process.env.TEMP_DIR || './temp';
-const UPLOAD_DIR = process.env.UPLOAD_DIR || './uploads';
+const TEMP_DIR = config.paths.tempDir;
+const UPLOAD_DIR = config.paths.uploadDir;
 
 fs.mkdirSync(TEMP_DIR, { recursive: true });
 
@@ -169,43 +184,79 @@ router.post('/pdf-to-images', toolsUpload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No se recibió archivo' });
 
   const dpi    = Math.min(300, Math.max(72, parseInt(req.body.dpi) || 150));
-  const format = req.body.format === 'jpg' ? 'jpeg' : 'png';
+  const imgFmt = req.body.format === 'jpg' ? 'jpg' : 'png';
+  const scale  = dpi / 72;  // PDF coordinates use 72 DPI as baseline
 
   const { jobId, jobDir } = req;
 
   try {
-    const converter = fromPath(req.file.path, {
-      density: dpi,
-      saveFilename: 'page',
-      savePath: jobDir,
-      format,
-      width: 1920,
+    const pdfjsLib = await getPdfJs();
+
+    const pdfData = new Uint8Array(fs.readFileSync(req.file.path));
+    const loadingTask = pdfjsLib.getDocument({
+      data: pdfData,
+      disableWorker: true,
+      verbosity: 0,
+      // Provide a minimal NodeCanvasFactory so pdfjs can draw
+      canvasFactory: {
+        create(width, height) {
+          const canvas  = createCanvas(width, height);
+          const context = canvas.getContext('2d');
+          return { canvas, context };
+        },
+        reset({ canvas, context }, width, height) {
+          canvas.width  = width;
+          canvas.height = height;
+          context.clearRect(0, 0, width, height);
+          return { canvas, context };
+        },
+        destroy({ canvas }) {
+          canvas.width  = 0;
+          canvas.height = 0;
+        },
+      },
     });
 
-    const results = await converter.bulk(-1, { responseType: 'image' });
+    const pdf   = await loadingTask.promise;
+    const files = [];
 
-    const files = results
-      .filter(r => r.path && fs.existsSync(r.path))
-      .map((r, i) => {
-        const filename = path.basename(r.path);
-        const size     = fs.statSync(r.path).size;
-        return {
-          page: i + 1,
-          filename,
-          url: `/api/tools/result/${jobId}/${filename}`,
-          size,
-          sizeLabel: formatBytes(size),
-        };
+    for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+      const page     = await pdf.getPage(pageNum);
+      const viewport = page.getViewport({ scale });
+
+      const canvas  = createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
+      const context = canvas.getContext('2d');
+
+      // White background (PDFs are transparent by default)
+      context.fillStyle = '#ffffff';
+      context.fillRect(0, 0, canvas.width, canvas.height);
+
+      await page.render({ canvasContext: context, viewport }).promise;
+
+      const ext      = imgFmt === 'jpg' ? 'jpg' : 'png';
+      const filename = `page_${pageNum}.${ext}`;
+      const filePath = path.join(jobDir, filename);
+
+      const buffer = imgFmt === 'jpg'
+        ? canvas.toBuffer('image/jpeg', { quality: 92 })
+        : canvas.toBuffer('image/png');
+
+      fs.writeFileSync(filePath, buffer);
+
+      const size = fs.statSync(filePath).size;
+      files.push({
+        page: pageNum,
+        filename,
+        url: `/api/tools/result/${jobId}/${filename}`,
+        size,
+        sizeLabel: formatBytes(size),
       });
+    }
 
     res.json({ jobId, files });
   } catch (err) {
     cleanupJob(jobId);
-    const msg = err.message || '';
-    const hint = msg.toLowerCase().includes('magick') || msg.toLowerCase().includes('gs')
-      ? ' Asegúrate de tener ImageMagick y Ghostscript instalados.'
-      : '';
-    res.status(500).json({ error: 'Error convirtiendo PDF: ' + msg + hint });
+    res.status(500).json({ error: 'Error convirtiendo PDF: ' + (err.message || err) });
   }
 });
 

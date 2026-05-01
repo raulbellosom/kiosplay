@@ -1,13 +1,69 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 
-const POLL_INTERVAL = 30000; // 30 segundos
+const POLL_INTERVAL = 30000;
+
+function cacheKey(slug) {
+  return `kiosk-cache:${slug}`;
+}
+
+function readCachedKiosk(slug) {
+  try {
+    const raw = window.localStorage.getItem(cacheKey(slug));
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeCachedKiosk(slug, data) {
+  try {
+    window.localStorage.setItem(cacheKey(slug), JSON.stringify(data));
+  } catch {
+    // Storage can be disabled or full; playback should continue online.
+  }
+}
+
+function playlistSignature(items) {
+  return (items || [])
+    .map(item => [
+      item.id,
+      item.filePath,
+      item.durationSeconds,
+      item.sortOrder,
+      item.updatedAt,
+      item.enabled,
+    ].join(':'))
+    .join('|');
+}
+
+function mediaUrl(item) {
+  return `/uploads${item.filePath}`;
+}
+
+function precachePlaylist(items) {
+  if (!('serviceWorker' in navigator)) return;
+
+  const urls = (items || []).map(mediaUrl);
+  if (urls.length === 0) return;
+
+  const message = { type: 'PRECACHE_MEDIA', urls };
+  if (navigator.serviceWorker.controller) {
+    navigator.serviceWorker.controller.postMessage(message);
+    return;
+  }
+
+  navigator.serviceWorker.ready
+    .then(registration => registration.active?.postMessage(message))
+    .catch(() => {});
+}
 
 export default function KioskView() {
   const { slug } = useParams();
+  const cachedKiosk = readCachedKiosk(slug);
 
-  const [kiosk, setKiosk] = useState(null);
-  const [items, setItems] = useState([]);
+  const [kiosk, setKiosk] = useState(cachedKiosk);
+  const [items, setItems] = useState(cachedKiosk?.items || []);
   const [notFound, setNotFound] = useState(false);
 
   const [currentIndex, setCurrentIndex] = useState(0);
@@ -15,48 +71,17 @@ export default function KioskView() {
 
   const videoRef = useRef(null);
   const timerRef = useRef(null);
-  const itemsRef = useRef([]);
+  const itemsRef = useRef(cachedKiosk?.items || []);
   const indexRef = useRef(0);
+  const kioskRef = useRef(cachedKiosk);
 
-  // Cargar datos del kiosko
-  const fetchKiosk = useCallback(async (isPolling = false) => {
-    try {
-      const res = await fetch(`/api/public/kiosk/${slug}`);
-      if (res.status === 404) { setNotFound(true); return; }
-      if (!res.ok) return;
-      const data = await res.json();
-
-      const newItems = data.items || [];
-
-      if (isPolling) {
-        // Comparar IDs para ver si el playlist cambió
-        const oldIds = itemsRef.current.map(i => i.id).join(',');
-        const newIds = newItems.map(i => i.id).join(',');
-        if (oldIds !== newIds) {
-          // Playlist cambió: resetear al inicio
-          itemsRef.current = newItems;
-          setItems(newItems);
-          goTo(0, newItems);
-        }
-      } else {
-        itemsRef.current = newItems;
-        setKiosk(data);
-        setItems(newItems);
-      }
-    } catch (e) {
-      // Silencioso en polling
-      if (!isPolling) setNotFound(true);
+  function clearTimer() {
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
     }
-  }, [slug]);
+  }
 
-  useEffect(() => {
-    fetchKiosk(false);
-
-    const pollId = setInterval(() => fetchKiosk(true), POLL_INTERVAL);
-    return () => clearInterval(pollId);
-  }, [fetchKiosk]);
-
-  // Ir a un índice concreto con fade
   function goTo(index, itemsOverride) {
     const list = itemsOverride || itemsRef.current;
     if (list.length === 0) return;
@@ -70,40 +95,79 @@ export default function KioskView() {
     }, 300);
   }
 
+  const fetchKiosk = useCallback(async (isPolling = false) => {
+    try {
+      const res = await fetch(`/api/public/kiosk/${slug}`);
+      if (res.status === 404) {
+        setNotFound(true);
+        return;
+      }
+      if (!res.ok) throw new Error('Kiosko no disponible');
+
+      const data = await res.json();
+      const newItems = data.items || [];
+
+      writeCachedKiosk(slug, data);
+      precachePlaylist(newItems);
+      setNotFound(false);
+      kioskRef.current = data;
+      setKiosk(data);
+
+      if (isPolling) {
+        if (playlistSignature(itemsRef.current) !== playlistSignature(newItems)) {
+          itemsRef.current = newItems;
+          setItems(newItems);
+          goTo(0, newItems);
+        }
+      } else {
+        itemsRef.current = newItems;
+        setItems(newItems);
+      }
+    } catch {
+      const cached = readCachedKiosk(slug);
+      if (cached && !isPolling) {
+        const cachedItems = cached.items || [];
+        itemsRef.current = cachedItems;
+        kioskRef.current = cached;
+        setKiosk(cached);
+        setItems(cachedItems);
+        setNotFound(false);
+      } else if (!isPolling && !kioskRef.current) {
+        setNotFound(true);
+      }
+    }
+  }, [slug]);
+
+  useEffect(() => {
+    fetchKiosk(false);
+
+    const pollId = setInterval(() => fetchKiosk(true), POLL_INTERVAL);
+    return () => clearInterval(pollId);
+  }, [fetchKiosk]);
+
   function advance() {
     goTo(indexRef.current + 1);
   }
 
-  function clearTimer() {
-    if (timerRef.current) {
-      clearTimeout(timerRef.current);
-      timerRef.current = null;
-    }
-  }
-
-  // Cuando cambia el item actual, programar el avance si es imagen
   useEffect(() => {
-    if (items.length === 0) return;
+    if (items.length === 0) return undefined;
     const item = items[currentIndex];
-    if (!item) return;
+    if (!item) return undefined;
 
     if (item.type === 'image') {
       clearTimer();
       timerRef.current = setTimeout(() => advance(), (item.durationSeconds || 5) * 1000);
     }
-    // Para video el avance se maneja en onEnded
 
     return () => clearTimer();
   }, [currentIndex, items]);
 
-  // Cuando el índice cambia y hay un video, intentar reproducirlo
   useEffect(() => {
     if (items.length === 0) return;
     const item = items[currentIndex];
     if (item?.type === 'video' && videoRef.current) {
       videoRef.current.load();
       videoRef.current.play().catch(() => {
-        // Retry tras un breve delay (algunos navegadores necesitan un tick)
         setTimeout(() => {
           if (videoRef.current) videoRef.current.play().catch(() => {});
         }, 300);
@@ -116,12 +180,10 @@ export default function KioskView() {
   }
 
   function handleVideoError() {
-    // Si el video falla, saltar al siguiente
     advance();
   }
 
-  function handleImageError(e) {
-    // Si la imagen falla, saltar al siguiente
+  function handleImageError() {
     advance();
   }
 
@@ -146,10 +208,12 @@ export default function KioskView() {
   }
 
   const item = items[currentIndex];
-  const mediaSrc = `/uploads${item.filePath}`;
+  const orientation = kiosk.orientation === 'landscape' ? 'landscape' : 'portrait';
+  const fitMode = kiosk.fitMode === 'contain' ? 'contain' : 'cover';
+  const mediaSrc = mediaUrl(item);
 
   return (
-    <div className="player-fullscreen">
+    <div className={`player-fullscreen player-fullscreen--${orientation}`}>
       {item.type === 'image' ? (
         <img
           key={item.id}
@@ -157,7 +221,7 @@ export default function KioskView() {
           alt=""
           className={`player-media ${fade ? 'player-fade' : ''}`}
           onError={handleImageError}
-          style={{ objectFit: 'cover' }}
+          style={{ objectFit: fitMode }}
         />
       ) : (
         <video
@@ -171,7 +235,7 @@ export default function KioskView() {
           onCanPlay={() => { if (videoRef.current) videoRef.current.play().catch(() => {}); }}
           onEnded={handleVideoEnded}
           onError={handleVideoError}
-          style={{ objectFit: 'cover' }}
+          style={{ objectFit: fitMode }}
         >
           <source src={mediaSrc} type={item.mimeType} />
         </video>

@@ -31,7 +31,7 @@ Permite gestionar pantallas con playlists de imágenes y videos desde un panel a
 | Git         | cualquiera    | Para clonar el repo |
 
 > **No se necesita Docker ni ningún servidor de base de datos externo.**
-> El proyecto usa **SQLite**, una base de datos que vive en un archivo local (`server/data/kiosko.db`).
+> El proyecto usa **SQLite**, una base de datos que vive en un archivo local (`data/kiosko.db` por defecto).
 > Se crea automáticamente al levantar el servidor por primera vez.
 
 ---
@@ -58,14 +58,14 @@ kiosko/
 │   │   ├── kiosks.js         # CRUD de kioskos
 │   │   ├── items.js          # Upload, edición y eliminación de items
 │   │   └── public.js         # Endpoint público usado por el player
-│   ├── data/
-│   │   └── kiosko.db         # Base de datos SQLite (se crea automáticamente)
-│   ├── uploads/              # Archivos multimedia (se crean automáticamente)
-│   │   └── <slug>/           # Carpeta por kiosko
 │   ├── app.js                # Entry point del servidor
 │   ├── db.js                 # Conexión y esquema SQLite
 │   ├── .env                  # Variables de entorno (no subir a git)
 │   └── package.json
+├── data/
+│   └── kiosko.db             # Base de datos SQLite (se crea automáticamente)
+├── uploads/                  # Archivos multimedia (se crean automáticamente)
+│   └── <slug>/               # Carpeta por kiosko
 ├── .env.example              # Plantilla de variables de entorno
 ├── .gitignore
 ├── package.json              # Scripts raíz (concurrently)
@@ -79,7 +79,7 @@ kiosko/
 El proyecto usa **SQLite** a través del paquete `better-sqlite3`.
 
 - **No requiere instalar ningún servidor** (ni MySQL, ni PostgreSQL, ni Docker).
-- La base de datos es un archivo en `server/data/kiosko.db`.
+- La base de datos es un archivo en `data/kiosko.db` por defecto.
 - Si el archivo no existe, se crea automáticamente con el esquema correcto al arrancar el servidor.
 - Para resetear completamente la base de datos, basta con borrar el archivo `kiosko.db` y reiniciar el servidor.
 
@@ -92,6 +92,8 @@ El proyecto usa **SQLite** a través del paquete `better-sqlite3`.
 | id         | INTEGER | Clave primaria autoincremental      |
 | name       | TEXT    | Nombre descriptivo (ej. "Recepción")|
 | slug       | TEXT    | Identificador URL (ej. "recepcion") |
+| orientation| TEXT    | `portrait` (9:16) o `landscape` (16:9) |
+| fitMode    | TEXT    | `cover` (rellenar) o `contain` (mostrar completo) |
 | enabled    | INTEGER | 1 = activo, 0 = desactivado         |
 | createdAt  | TEXT    | Fecha de creación                   |
 | updatedAt  | TEXT    | Última modificación                 |
@@ -128,6 +130,7 @@ Contenido del archivo:
 PORT=3001
 SQLITE_PATH=./data/kiosko.db
 UPLOAD_DIR=./uploads
+TEMP_DIR=./temp
 PUBLIC_BASE_URL=http://localhost:5173
 MAX_FILE_SIZE_MB=200
 ```
@@ -137,10 +140,18 @@ MAX_FILE_SIZE_MB=200
 | `PORT`           | Puerto donde corre el servidor Express                        |
 | `SQLITE_PATH`    | Ruta al archivo de base de datos SQLite                       |
 | `UPLOAD_DIR`     | Carpeta donde se guardan los archivos multimedia              |
+| `TEMP_DIR`       | Carpeta para archivos temporales de herramientas              |
 | `PUBLIC_BASE_URL`| URL base pública (usada en dev para el proxy del frontend)    |
 | `MAX_FILE_SIZE_MB`| Tamaño máximo de archivo en MB para uploads                 |
 
 > En producción, cambia `PUBLIC_BASE_URL` a la URL real del servidor (ej. `https://pvrinfo.giize.com`).
+> Para despliegues con PM2/systemd, se recomiendan rutas absolutas para no depender del directorio desde donde arranque Node:
+>
+> ```env
+> SQLITE_PATH=/opt/kiosplay/data/kiosko.db
+> UPLOAD_DIR=/opt/kiosplay/uploads
+> TEMP_DIR=/opt/kiosplay/temp
+> ```
 
 ---
 
@@ -252,6 +263,9 @@ nano server/.env
 Ajustar al menos:
 ```env
 PORT=3001
+SQLITE_PATH=/opt/kiosplay/data/kiosko.db
+UPLOAD_DIR=/opt/kiosplay/uploads
+TEMP_DIR=/opt/kiosplay/temp
 PUBLIC_BASE_URL=https://pvrinfo.giize.com
 ```
 
@@ -367,6 +381,51 @@ firefox --no-remote --kiosk http://pvrinfo.giize.com/slug-del-kiosko
 
 Reemplaza `slug-del-kiosko` con el slug configurado en el panel admin (ej. `recepcion`, `proveedores`).
 
+### Chromium en CTS con persistencia offline
+
+Para CTS/Raspberry/Bookworm se recomienda Chromium con un perfil fijo. No borres `--user-data-dir` ni `--disk-cache-dir`; ahi viven el perfil, el service worker, `localStorage` y la cache offline del ultimo contenido cargado.
+
+```bash
+/usr/bin/chromium-browser \
+  --kiosk \
+  --start-fullscreen \
+  --app=https://pvrinfo.giize.com/slug-del-kiosko \
+  --user-data-dir=/home/admin/.config/chromium-kiosk \
+  --disk-cache-dir=/home/admin/.cache/chromium-kiosk
+```
+
+La primera carga de cada kiosko debe hacerse con internet para sembrar cache. Despues, si la CTS reinicia sin internet, el service worker sirve el app shell, la ultima playlist valida y los medios ya descargados.
+
+### Formato de pantalla
+
+Cada kiosko tiene formato `Vertical 9:16 (1080x1920)` o `Horizontal 16:9 (1920x1080)`.
+
+Tambien puede elegir el ajuste del contenido:
+- `Rellenar pantalla` (`cover`): llena toda la pantalla y puede recortar bordes.
+- `Mostrar completo` (`contain`): conserva la imagen o video completo y puede dejar barras negras.
+
+### Reutilizar contenido entre kioskos
+
+Desde el editor de un kiosko, el boton `Agregar existente` permite seleccionar imagenes o videos que ya estan en otros playlists. El sistema agrega una nueva entrada al playlist actual apuntando al mismo archivo, sin duplicarlo en disco.
+
+Al eliminar un item, solo se quita de ese playlist. El archivo fisico se borra unicamente cuando ningun playlist lo sigue usando.
+
+### Pantallas Samsung/Tizen antiguas
+
+El player moderno sigue en:
+
+```text
+https://pvrinfo.giize.com/slug-del-kiosko
+```
+
+Para navegadores integrados antiguos usa el player liviano:
+
+```text
+https://pvrinfo.giize.com/tv/slug-del-kiosko
+```
+
+Ese player guarda la ultima playlist en `localStorage` y usa service worker si el navegador lo soporta. En Samsung/Tizen viejo la persistencia offline es de mejor esfuerzo; para garantia fuerte usa una CTS externa con Chromium.
+
 ---
 
 ## API REST
@@ -374,16 +433,19 @@ Reemplaza `slug-del-kiosko` con el slug configurado en el panel admin (ej. `rece
 | Método | Ruta | Descripción |
 |--------|------|-------------|
 | GET | `/api/kiosks` | Listar todos los kioskos |
-| POST | `/api/kiosks` | Crear un kiosko |
+| POST | `/api/kiosks` | Crear un kiosko (acepta `orientation` y `fitMode`) |
 | GET | `/api/kiosks/:id` | Obtener un kiosko |
-| PUT | `/api/kiosks/:id` | Editar nombre/slug/estado |
-| DELETE | `/api/kiosks/:id` | Eliminar kiosko y sus archivos |
+| PUT | `/api/kiosks/:id` | Editar nombre/slug/estado/formato |
+| DELETE | `/api/kiosks/:id` | Eliminar kiosko y borrar solo archivos sin otras referencias |
+| GET | `/api/kiosks/:id/media-library` | Listar contenido reutilizable de otros kioskos |
 | GET | `/api/kiosks/:id/items` | Listar items de la playlist |
 | POST | `/api/kiosks/:id/items/upload` | Subir archivos (multipart/form-data) |
+| POST | `/api/kiosks/:id/items/from-existing` | Agregar al playlist contenido ya existente |
 | PUT | `/api/items/:id` | Editar item (enabled, durationSeconds) |
 | DELETE | `/api/items/:id` | Eliminar item y su archivo |
 | PUT | `/api/kiosks/:id/reorder` | Reordenar playlist |
 | GET | `/api/public/kiosk/:slug` | Datos del kiosko para el player |
+| GET | `/tv/:slug` | Player legacy para navegadores Samsung/Tizen antiguos |
 
 ---
 
@@ -464,7 +526,7 @@ Es solo un warning, no afecta el funcionamiento. Se puede ignorar o resolver act
 
 ```bash
 # Detener el servidor primero, luego:
-rm server/data/kiosko.db
+rm data/kiosko.db
 
 # Al reiniciar, se crea automáticamente con el esquema vacío
 npm run dev
@@ -472,5 +534,5 @@ npm run dev
 
 Para eliminar también los archivos subidos:
 ```bash
-rm -rf server/uploads/*
+rm -rf uploads/*
 ```

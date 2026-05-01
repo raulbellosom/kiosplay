@@ -4,18 +4,38 @@ const db = require('../db');
 const slugify = require('slugify');
 const path = require('path');
 const fs = require('fs');
+const config = require('../config');
+const { deleteUnreferencedFiles } = require('../mediaFiles');
 
-const UPLOAD_DIR = process.env.UPLOAD_DIR || './uploads';
+const UPLOAD_DIR = config.paths.uploadDir;
+const ORIENTATIONS = new Set(['portrait', 'landscape']);
+const FIT_MODES = new Set(['cover', 'contain']);
+
+function normalizeOrientation(value, fallback = 'portrait') {
+  return ORIENTATIONS.has(value) ? value : fallback;
+}
+
+function normalizeFitMode(value, fallback = 'cover') {
+  return FIT_MODES.has(value) ? value : fallback;
+}
 
 // GET /api/kiosks
 router.get('/', (req, res) => {
-  const kiosks = db.prepare('SELECT * FROM kiosks ORDER BY createdAt DESC').all();
+  const kiosks = db.prepare(`
+    SELECT k.*,
+      COUNT(ki.id) as totalItems,
+      SUM(CASE WHEN ki.enabled = 1 THEN 1 ELSE 0 END) as enabledItems
+    FROM kiosks k
+    LEFT JOIN kiosk_items ki ON ki.kioskId = k.id
+    GROUP BY k.id
+    ORDER BY k.createdAt DESC
+  `).all();
   res.json(kiosks);
 });
 
 // POST /api/kiosks
 router.post('/', (req, res) => {
-  const { name, slug } = req.body;
+  const { name, slug, orientation, fitMode } = req.body;
 
   if (!name || !name.trim()) {
     return res.status(400).json({ error: 'El nombre es requerido' });
@@ -43,8 +63,8 @@ router.post('/', (req, res) => {
   }
 
   const result = db.prepare(
-    'INSERT INTO kiosks (name, slug) VALUES (?, ?)'
-  ).run(name.trim(), finalSlug);
+    'INSERT INTO kiosks (name, slug, orientation, fitMode) VALUES (?, ?, ?, ?)'
+  ).run(name.trim(), finalSlug, normalizeOrientation(orientation), normalizeFitMode(fitMode));
 
   const kiosk = db.prepare('SELECT * FROM kiosks WHERE id = ?').get(result.lastInsertRowid);
   res.status(201).json(kiosk);
@@ -62,7 +82,7 @@ router.put('/:id', (req, res) => {
   const kiosk = db.prepare('SELECT * FROM kiosks WHERE id = ?').get(req.params.id);
   if (!kiosk) return res.status(404).json({ error: 'Kiosko no encontrado' });
 
-  const { name, slug, enabled } = req.body;
+  const { name, slug, enabled, orientation, fitMode } = req.body;
 
   const newName = (name && name.trim()) ? name.trim() : kiosk.name;
   let newSlug = kiosk.slug;
@@ -87,21 +107,27 @@ router.put('/:id', (req, res) => {
       const newDir = path.join(UPLOAD_DIR, newSlug);
       if (fs.existsSync(oldDir)) {
         fs.renameSync(oldDir, newDir);
-        // Actualizar paths en DB
+        // Actualizar todos los playlists que apuntan a archivos de este kiosko.
         db.prepare(`
           UPDATE kiosk_items
           SET filePath = REPLACE(filePath, ?, ?)
-          WHERE kioskId = ?
-        `).run(`/${kiosk.slug}/`, `/${newSlug}/`, kiosk.id);
+          WHERE filePath LIKE ?
+        `).run(`/${kiosk.slug}/`, `/${newSlug}/`, `/${kiosk.slug}/%`);
       }
     }
   }
 
   const newEnabled = enabled !== undefined ? (enabled ? 1 : 0) : kiosk.enabled;
+  const newOrientation = orientation !== undefined
+    ? normalizeOrientation(orientation, kiosk.orientation || 'portrait')
+    : kiosk.orientation || 'portrait';
+  const newFitMode = fitMode !== undefined
+    ? normalizeFitMode(fitMode, kiosk.fitMode || 'cover')
+    : kiosk.fitMode || 'cover';
 
   db.prepare(
-    "UPDATE kiosks SET name = ?, slug = ?, enabled = ?, updatedAt = datetime('now') WHERE id = ?"
-  ).run(newName, newSlug, newEnabled, req.params.id);
+    "UPDATE kiosks SET name = ?, slug = ?, orientation = ?, fitMode = ?, enabled = ?, updatedAt = datetime('now') WHERE id = ?"
+  ).run(newName, newSlug, newOrientation, newFitMode, newEnabled, req.params.id);
 
   const updated = db.prepare('SELECT * FROM kiosks WHERE id = ?').get(req.params.id);
   res.json(updated);
@@ -112,13 +138,11 @@ router.delete('/:id', (req, res) => {
   const kiosk = db.prepare('SELECT * FROM kiosks WHERE id = ?').get(req.params.id);
   if (!kiosk) return res.status(404).json({ error: 'Kiosko no encontrado' });
 
-  // Eliminar archivos del disco
-  const kioskDir = path.join(UPLOAD_DIR, kiosk.slug);
-  if (fs.existsSync(kioskDir)) {
-    fs.rmSync(kioskDir, { recursive: true, force: true });
-  }
+  const filePaths = db.prepare('SELECT filePath FROM kiosk_items WHERE kioskId = ?').all(kiosk.id)
+    .map(item => item.filePath);
 
   db.prepare('DELETE FROM kiosks WHERE id = ?').run(req.params.id);
+  deleteUnreferencedFiles(db, UPLOAD_DIR, filePaths);
   res.json({ ok: true });
 });
 

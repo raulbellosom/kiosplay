@@ -4,6 +4,11 @@ server/node_modules/
 client/dist/
 server/uploads/
 server/data/
+data/
+uploads/
+temp/
 .env
 *.db
+*.db-shm
+*.db-wal
 .claude/

@@ -1,8 +1,9 @@
 const Database = require('better-sqlite3');
 const path = require('path');
 const fs = require('fs');
+const config = require('./config');
 
-const dbPath = process.env.SQLITE_PATH || './data/kiosko.db';
+const dbPath = config.paths.sqlitePath;
 const dbDir = path.dirname(dbPath);
 
 if (!fs.existsSync(dbDir)) {
@@ -20,6 +21,8 @@ db.exec(`
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     slug TEXT NOT NULL UNIQUE,
+    orientation TEXT NOT NULL DEFAULT 'portrait' CHECK(orientation IN ('portrait', 'landscape')),
+    fitMode TEXT NOT NULL DEFAULT 'cover' CHECK(fitMode IN ('cover', 'contain')),
     enabled INTEGER NOT NULL DEFAULT 1,
     createdAt TEXT NOT NULL DEFAULT (datetime('now')),
     updatedAt TEXT NOT NULL DEFAULT (datetime('now'))
@@ -41,5 +44,24 @@ db.exec(`
     updatedAt TEXT NOT NULL DEFAULT (datetime('now'))
   );
 `);
+
+function ensureColumn(table, column, definition) {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all();
+  if (!columns.some(c => c.name === column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+}
+
+ensureColumn(
+  'kiosks',
+  'orientation',
+  "TEXT NOT NULL DEFAULT 'portrait' CHECK(orientation IN ('portrait', 'landscape'))",
+);
+
+ensureColumn(
+  'kiosks',
+  'fitMode',
+  "TEXT NOT NULL DEFAULT 'cover' CHECK(fitMode IN ('cover', 'contain'))",
+);
 
 module.exports = db;
