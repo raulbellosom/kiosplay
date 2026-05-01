@@ -1,18 +1,19 @@
-// Service Worker – kiosplay
-// Strategies:
-//   /uploads/*  → network-pass-through online; SW cache fallback offline
-//                 (full 200 responses are saved in SW cache for offline use,
-//                  range requests are satisfied by slicing the cached blob)
-//   /api/public/* → network-first; SW cache fallback offline
-//   everything else → no interception
+// Service Worker - kiosplay
+// Keeps the kiosk app shell, public playlist API, and media available after
+// Chromium restarts without internet.
 
-const MEDIA_CACHE = 'kiosplay-media-v1';
-const API_CACHE   = 'kiosplay-api-v1';
+const APP_SHELL_CACHE = 'kiosplay-shell-v2';
+const MEDIA_CACHE = 'kiosplay-media-v2';
+const API_CACHE = 'kiosplay-api-v2';
+const APP_SHELL_URLS = ['/', '/index.html'];
+const EXPECTED_CACHES = [APP_SHELL_CACHE, MEDIA_CACHE, API_CACHE];
 
-// ── Lifecycle ────────────────────────────────────────────────────────────────
-
-self.addEventListener('install', () => {
-  self.skipWaiting();
+self.addEventListener('install', event => {
+  event.waitUntil(
+    cacheAppShell()
+      .catch(() => undefined)
+      .then(() => self.skipWaiting()),
+  );
 });
 
 self.addEventListener('activate', event => {
@@ -20,21 +21,29 @@ self.addEventListener('activate', event => {
     caches.keys()
       .then(keys => Promise.all(
         keys
-          .filter(k => k !== MEDIA_CACHE && k !== API_CACHE)
-          .map(k => caches.delete(k)),
+          .filter(key => !EXPECTED_CACHES.includes(key))
+          .map(key => caches.delete(key)),
       ))
       .then(() => self.clients.claim()),
   );
 });
 
-// ── Fetch ────────────────────────────────────────────────────────────────────
+self.addEventListener('message', event => {
+  const data = event.data || {};
+  if (data.type !== 'PRECACHE_MEDIA' || !Array.isArray(data.urls)) return;
+
+  event.waitUntil(precacheMedia(data.urls));
+});
 
 self.addEventListener('fetch', event => {
   const url = new URL(event.request.url);
 
-  // Only handle same-origin requests; skip admin pages.
   if (url.origin !== self.location.origin) return;
-  if (url.pathname.startsWith('/admin')) return;
+
+  if (event.request.mode === 'navigate') {
+    event.respondWith(navigationFallback(event.request));
+    return;
+  }
 
   if (url.pathname.startsWith('/uploads/')) {
     event.respondWith(handleMedia(event.request));
@@ -45,33 +54,75 @@ self.addEventListener('fetch', event => {
     event.respondWith(networkFirst(event.request, API_CACHE));
     return;
   }
+
+  if (url.pathname.startsWith('/assets/') || url.pathname === '/index.html' || url.pathname === '/') {
+    event.respondWith(cacheFirst(event.request, APP_SHELL_CACHE));
+  }
 });
 
-// ── Media handler ────────────────────────────────────────────────────────────
-// Online: pass request through unchanged (server Cache-Control + browser HTTP
-//         cache handle it). Cache every complete (200) response in the SW
-//         cache so it is available offline.
-// Offline: serve from SW cache, slicing the stored blob to satisfy any Range
-//          header the browser sends (required for <video> streaming).
+async function cacheAppShell() {
+  const cache = await caches.open(APP_SHELL_CACHE);
+  await cache.addAll(APP_SHELL_URLS);
+
+  const indexResponse = await cache.match('/index.html') || await cache.match('/');
+  if (!indexResponse) return;
+
+  const html = await indexResponse.clone().text();
+  const assetUrls = [];
+  const assetPattern = /(?:src|href)="([^"]*\/assets\/[^"]+)"/g;
+  let match;
+
+  while ((match = assetPattern.exec(html))) {
+    assetUrls.push(new URL(match[1], self.location.origin).pathname);
+  }
+
+  if (assetUrls.length > 0) {
+    await cache.addAll(assetUrls);
+  }
+}
+
+async function navigationFallback(request) {
+  try {
+    const response = await fetch(request);
+    if (response.ok) {
+      const cache = await caches.open(APP_SHELL_CACHE);
+      cache.put(request, response.clone());
+    }
+    return response;
+  } catch {
+    const cache = await caches.open(APP_SHELL_CACHE);
+    return await cache.match('/index.html')
+      || await cache.match('/')
+      || new Response('Offline', { status: 503, headers: { 'Content-Type': 'text/plain' } });
+  }
+}
+
+async function cacheFirst(request, cacheName) {
+  const cache = await caches.open(cacheName);
+  const cached = await cache.match(request);
+  if (cached) return cached;
+
+  const response = await fetch(request);
+  if (response.ok) {
+    cache.put(request, response.clone());
+  }
+  return response;
+}
 
 async function handleMedia(request) {
-  const cache    = await caches.open(MEDIA_CACHE);
-  const cacheKey = new Request(request.url); // key without Range header
+  const cache = await caches.open(MEDIA_CACHE);
+  const cacheKey = new Request(request.url);
 
   try {
     const response = await fetch(request);
-
-    // Store full responses for offline use (don't await – run in background).
     if (response.ok && response.status === 200) {
       cache.put(cacheKey, response.clone());
     }
-
     return response;
   } catch {
-    // Network failed – try to serve from SW cache.
     const cached = await cache.match(cacheKey);
     if (!cached) {
-      return new Response(null, { status: 503, statusText: 'Offline – media not cached' });
+      return new Response(null, { status: 503, statusText: 'Offline media not cached' });
     }
 
     const rangeHeader = request.headers.get('Range');
@@ -79,22 +130,34 @@ async function handleMedia(request) {
   }
 }
 
-// ── Range-slice helper ───────────────────────────────────────────────────────
-// Reads the full cached blob and returns a proper 206 Partial Content response
-// for the requested byte range.  Needed because the Cache API stores complete
-// responses; the browser always uses Range requests when streaming <video>.
+async function precacheMedia(urls) {
+  const cache = await caches.open(MEDIA_CACHE);
+  const uniqueUrls = Array.from(new Set(urls))
+    .map(url => new URL(url, self.location.origin))
+    .filter(url => url.origin === self.location.origin && url.pathname.startsWith('/uploads/'));
+
+  await Promise.all(uniqueUrls.map(async url => {
+    const cacheKey = new Request(url.href);
+    const cached = await cache.match(cacheKey);
+    if (cached) return;
+
+    const response = await fetch(cacheKey);
+    if (response.ok && response.status === 200) {
+      await cache.put(cacheKey, response.clone());
+    }
+  }));
+}
 
 async function sliceResponse(response, rangeHeader) {
-  const blob  = await response.clone().blob();
+  const blob = await response.clone().blob();
   const total = blob.size;
 
   const match = /bytes=(\d+)-(\d*)/.exec(rangeHeader);
   if (!match) return response.clone();
 
-  const start  = parseInt(match[1], 10);
+  const start = parseInt(match[1], 10);
   const rawEnd = match[2] ? parseInt(match[2], 10) : total - 1;
 
-  // Validate range bounds.
   if (start >= total || start > rawEnd) {
     return new Response(null, {
       status: 416,
@@ -103,23 +166,20 @@ async function sliceResponse(response, rangeHeader) {
     });
   }
 
-  // Clamp end so it never exceeds the last byte index.
-  const end   = Math.min(rawEnd, total - 1);
+  const end = Math.min(rawEnd, total - 1);
   const slice = blob.slice(start, end + 1);
 
   return new Response(slice, {
     status: 206,
     statusText: 'Partial Content',
     headers: {
-      'Content-Type':  response.headers.get('Content-Type') || 'application/octet-stream',
+      'Content-Type': response.headers.get('Content-Type') || 'application/octet-stream',
       'Content-Range': `bytes ${start}-${end}/${total}`,
       'Content-Length': String(end - start + 1),
       'Accept-Ranges': 'bytes',
     },
   });
 }
-
-// ── Network-first helper ─────────────────────────────────────────────────────
 
 async function networkFirst(request, cacheName) {
   try {
@@ -130,7 +190,8 @@ async function networkFirst(request, cacheName) {
     }
     return response;
   } catch {
-    const cached = await caches.match(request);
+    const cache = await caches.open(cacheName);
+    const cached = await cache.match(request);
     return cached || new Response(
       JSON.stringify({ error: 'Offline' }),
       { status: 503, headers: { 'Content-Type': 'application/json' } },

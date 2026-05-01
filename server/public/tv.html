@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>PVRInfo TV</title>
+    <style>
+      html, body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        background: #000;
+        overflow: hidden;
+        cursor: none;
+      }
+
+      #stage {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #000;
+      }
+
+      .media {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+      }
+
+      .empty {
+        color: #333;
+        font: 14px Arial, sans-serif;
+        letter-spacing: 1px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="stage"></div>
+    <script>
+      (function () {
+        var POLL_INTERVAL = 30000;
+        var stage = document.getElementById('stage');
+        var slug = decodeURIComponent(window.location.pathname.replace(/^\/tv\//, '').split('/')[0] || '');
+        var kiosk = null;
+        var items = [];
+        var index = 0;
+        var timer = null;
+
+        function cacheKey() {
+          return 'kiosk-cache:' + slug;
+        }
+
+        function mediaUrl(item) {
+          return '/uploads' + item.filePath;
+        }
+
+        function fitMode() {
+          return kiosk && kiosk.fitMode === 'contain' ? 'contain' : 'cover';
+        }
+
+        function showMessage(text) {
+          stage.innerHTML = '<div class="empty">' + text + '</div>';
+        }
+
+        function readCache() {
+          try {
+            var raw = window.localStorage.getItem(cacheKey());
+            return raw ? JSON.parse(raw) : null;
+          } catch (e) {
+            return null;
+          }
+        }
+
+        function writeCache(data) {
+          try {
+            window.localStorage.setItem(cacheKey(), JSON.stringify(data));
+          } catch (e) {}
+        }
+
+        function requestJson(url, done) {
+          var xhr = new XMLHttpRequest();
+          xhr.open('GET', url, true);
+          xhr.onreadystatechange = function () {
+            if (xhr.readyState !== 4) return;
+            if (xhr.status >= 200 && xhr.status < 300) {
+              try {
+                done(null, JSON.parse(xhr.responseText));
+              } catch (e) {
+                done(e);
+              }
+            } else {
+              done(new Error('HTTP ' + xhr.status));
+            }
+          };
+          xhr.onerror = function () {
+            done(new Error('network'));
+          };
+          xhr.send();
+        }
+
+        function precacheMedia() {
+          if (!('serviceWorker' in navigator) || !items.length) return;
+
+          var urls = items.map(mediaUrl);
+          var message = { type: 'PRECACHE_MEDIA', urls: urls };
+
+          if (navigator.serviceWorker.controller) {
+            navigator.serviceWorker.controller.postMessage(message);
+            return;
+          }
+
+          navigator.serviceWorker.ready.then(function (registration) {
+            if (registration.active) registration.active.postMessage(message);
+          }).catch(function () {});
+        }
+
+        function loadData() {
+          requestJson('/api/public/kiosk/' + encodeURIComponent(slug), function (err, data) {
+            if (err) {
+              var cached = readCache();
+              if (cached && !kiosk) {
+                kiosk = cached;
+                items = cached.items || [];
+                render();
+              } else if (!kiosk) {
+                showMessage('Sin conexion');
+              }
+              return;
+            }
+
+            kiosk = data;
+            items = data.items || [];
+            writeCache(data);
+            precacheMedia();
+            if (index >= items.length) index = 0;
+            render();
+          });
+        }
+
+        function clearTimer() {
+          if (timer) {
+            window.clearTimeout(timer);
+            timer = null;
+          }
+        }
+
+        function advance() {
+          if (!items.length) return;
+          index = (index + 1) % items.length;
+          render();
+        }
+
+        function render() {
+          clearTimer();
+          if (!items.length) {
+            showMessage('Sin contenido');
+            return;
+          }
+
+          var item = items[index];
+          var src = mediaUrl(item);
+          stage.innerHTML = '';
+
+          if (item.type === 'video') {
+            var video = document.createElement('video');
+            video.className = 'media';
+            video.autoplay = true;
+            video.muted = true;
+            video.loop = false;
+            video.playsInline = true;
+            video.setAttribute('playsinline', '');
+            video.setAttribute('webkit-playsinline', '');
+            video.preload = 'auto';
+            video.onerror = advance;
+            video.onended = advance;
+            video.style.objectFit = fitMode();
+
+            var source = document.createElement('source');
+            source.src = src;
+            source.type = item.mimeType || 'video/mp4';
+            video.appendChild(source);
+            stage.appendChild(video);
+
+            var play = video.play();
+            if (play && play.catch) play.catch(function () {});
+            return;
+          }
+
+          var img = document.createElement('img');
+          img.className = 'media';
+          img.alt = '';
+          img.onerror = advance;
+          img.style.objectFit = fitMode();
+          img.onload = function () {
+            timer = window.setTimeout(advance, (item.durationSeconds || 5) * 1000);
+          };
+          img.src = src;
+          stage.appendChild(img);
+        }
+
+        if ('serviceWorker' in navigator) {
+          navigator.serviceWorker.register('/sw.js').catch(function () {});
+        }
+
+        loadData();
+        window.setInterval(loadData, POLL_INTERVAL);
+      })();
+    </script>
+  </body>
+</html>

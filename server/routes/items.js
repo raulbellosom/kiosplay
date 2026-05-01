@@ -4,9 +4,11 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const db = require('../db');
+const config = require('../config');
+const { deleteFileIfUnreferenced } = require('../mediaFiles');
 
-const UPLOAD_DIR = process.env.UPLOAD_DIR || './uploads';
-const MAX_FILE_SIZE_MB = parseInt(process.env.MAX_FILE_SIZE_MB || '200', 10);
+const UPLOAD_DIR = config.paths.uploadDir;
+const MAX_FILE_SIZE_MB = config.maxFileSizeMb;
 
 const ALLOWED_MIME = {
   'image/jpeg': 'image',
@@ -109,6 +111,96 @@ router.post('/:id/items/upload', (req, res) => {
   });
 });
 
+// GET /api/kiosks/:id/media-library
+router.get('/:id/media-library', (req, res) => {
+  const kiosk = db.prepare('SELECT * FROM kiosks WHERE id = ?').get(req.params.id);
+  if (!kiosk) return res.status(404).json({ error: 'Kiosko no encontrado' });
+
+  const items = db.prepare(`
+    SELECT ki.*, k.name as sourceKioskName, k.slug as sourceKioskSlug
+    FROM kiosk_items ki
+    JOIN kiosks k ON k.id = ki.kioskId
+    JOIN (
+      SELECT MIN(id) as id
+      FROM kiosk_items
+      WHERE kioskId != ?
+        AND filePath NOT IN (SELECT filePath FROM kiosk_items WHERE kioskId = ?)
+      GROUP BY filePath
+    ) picked ON picked.id = ki.id
+    ORDER BY k.name COLLATE NOCASE ASC, ki.originalName COLLATE NOCASE ASC
+  `).all(kiosk.id, kiosk.id);
+
+  res.json(items);
+});
+
+// POST /api/kiosks/:id/items/from-existing
+router.post('/:id/items/from-existing', (req, res) => {
+  const kiosk = db.prepare('SELECT * FROM kiosks WHERE id = ?').get(req.params.id);
+  if (!kiosk) return res.status(404).json({ error: 'Kiosko no encontrado' });
+
+  const itemIds = Array.isArray(req.body?.itemIds)
+    ? req.body.itemIds.map(id => parseInt(id, 10)).filter(Number.isInteger)
+    : [];
+
+  if (itemIds.length === 0) {
+    return res.status(400).json({ error: 'Se requiere itemIds' });
+  }
+
+  const placeholders = itemIds.map(() => '?').join(',');
+  const sourceItems = db.prepare(`
+    SELECT *
+    FROM kiosk_items
+    WHERE id IN (${placeholders})
+      AND kioskId != ?
+    ORDER BY id ASC
+  `).all(...itemIds, kiosk.id);
+
+  const existingPaths = new Set(
+    db.prepare('SELECT filePath FROM kiosk_items WHERE kioskId = ?').all(kiosk.id)
+      .map(item => item.filePath),
+  );
+  const maxOrder = db.prepare(
+    'SELECT MAX(sortOrder) as m FROM kiosk_items WHERE kioskId = ?'
+  ).get(kiosk.id);
+  let nextOrder = (maxOrder?.m ?? -1) + 1;
+
+  const insertStmt = db.prepare(`
+    INSERT INTO kiosk_items
+      (kioskId, type, filename, originalName, filePath, mimeType, size, durationSeconds, sortOrder, enabled)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+  `);
+
+  const insertMany = db.transaction((items) => {
+    const inserted = [];
+    const skipped = [];
+
+    for (const item of items) {
+      if (existingPaths.has(item.filePath)) {
+        skipped.push(item.id);
+        continue;
+      }
+
+      const result = insertStmt.run(
+        kiosk.id,
+        item.type,
+        item.filename,
+        item.originalName,
+        item.filePath,
+        item.mimeType,
+        item.size,
+        item.durationSeconds,
+        nextOrder++,
+      );
+      existingPaths.add(item.filePath);
+      inserted.push(db.prepare('SELECT * FROM kiosk_items WHERE id = ?').get(result.lastInsertRowid));
+    }
+
+    return { inserted, skipped };
+  });
+
+  res.status(201).json(insertMany(sourceItems));
+});
+
 // PUT /api/items/:id
 router.put('/:id', (req, res) => {
   const item = db.prepare('SELECT * FROM kiosk_items WHERE id = ?').get(req.params.id);
@@ -136,13 +228,8 @@ router.delete('/:id', (req, res) => {
   const item = db.prepare('SELECT * FROM kiosk_items WHERE id = ?').get(req.params.id);
   if (!item) return res.status(404).json({ error: 'Item no encontrado' });
 
-  // Eliminar archivo del disco
-  const filePath = path.join(UPLOAD_DIR, item.filePath);
-  if (fs.existsSync(filePath)) {
-    fs.unlinkSync(filePath);
-  }
-
   db.prepare('DELETE FROM kiosk_items WHERE id = ?').run(req.params.id);
+  deleteFileIfUnreferenced(db, UPLOAD_DIR, item.filePath);
   res.json({ ok: true });
 });
 

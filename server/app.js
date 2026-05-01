@@ -1,14 +1,13 @@
-require('dotenv').config();
-
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
+const config = require('./config');
 
 const app = express();
-const PORT = process.env.PORT || 3001;
-const UPLOAD_DIR = process.env.UPLOAD_DIR || './uploads';
-const TEMP_DIR   = process.env.TEMP_DIR   || './temp';
+const PORT = config.port;
+const UPLOAD_DIR = config.paths.uploadDir;
+const TEMP_DIR   = config.paths.tempDir;
 
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 fs.mkdirSync(TEMP_DIR, { recursive: true });
@@ -41,6 +40,13 @@ app.use('/api/kiosks', require('./routes/kiosks'));
 app.use('/api/kiosks', require('./routes/items'));
 app.use('/api/items', require('./routes/items'));
 app.use('/api/public', require('./routes/public'));
+
+const tvPlayer = path.join(__dirname, 'public', 'tv.html');
+if (fs.existsSync(tvPlayer)) {
+  app.get('/tv/:slug', (req, res) => {
+    res.sendFile(tvPlayer);
+  });
+}
 
 // En producción: servir el build del frontend
 const clientBuild = path.join(__dirname, '../client/dist');
